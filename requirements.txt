@@ -18,3 +18,4 @@ robosapiensio>=0.4.0
 # - json
 # - tkinter (included with Python)
 # - random
+# - unittest (included with Python)
