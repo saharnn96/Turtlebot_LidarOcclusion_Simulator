@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Redis service for communication
+  redis:
+    image: redis:7-alpine
+    container_name: turtlebot_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - turtlebot_network
+
+  # TurtleBot Dash Simulator
+  turtlebot_dash:
+    build: .
+    container_name: turtlebot_dash_simulator
+    ports:
+      - "8050:8050"
+    environment:
+      - DASH_HOST=0.0.0.0
+      - DASH_PORT=8050
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    networks:
+      - turtlebot_network
+
+networks:
+  turtlebot_network:
+    driver: bridge
