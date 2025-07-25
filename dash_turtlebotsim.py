@@ -2,9 +2,6 @@ import time
 import threading
 import json
 import os
-import socket
-import logging
-from datetime import datetime
 import numpy as np
 import paho.mqtt.client as mqtt
 import random
@@ -21,50 +18,6 @@ MQTT_BROKER = "localhost"
 POSE_TOPIC = "/pose"
 SCAN_TOPIC = "/Scan"
 SPIN_CONFIG_TOPIC = "/spin_config"
-
-# Redis logging class
-class RedisLogger:
-    def __init__(self, client, container_name):
-        self.client = client
-        self.container_name = container_name
-        self.log_key = f"{container_name}:logs"
-        
-    def log(self, level, message):
-        """Log a message to Redis"""
-        try:
-            timestamp = datetime.now().isoformat()
-            log_entry = {
-                "timestamp": timestamp,
-                "level": level,
-                "message": message,
-                "container": self.container_name
-            }
-            
-            if self.client:
-                # Store as a list in Redis (LPUSH adds to the beginning)
-                self.client.client.lpush(self.log_key, json.dumps(log_entry))
-                # Keep only last 1000 log entries
-                self.client.client.ltrim(self.log_key, 0, 999)
-                
-        except Exception as e:
-            # Fallback to console if Redis logging fails
-            print(f"[{timestamp}] [{level}] {message}")
-            print(f"Redis logging error: {e}")
-    
-    def info(self, message):
-        self.log("INFO", message)
-        
-    def warning(self, message):
-        self.log("WARNING", message)
-        
-    def error(self, message):
-        self.log("ERROR", message)
-        
-    def debug(self, message):
-        self.log("DEBUG", message)
-
-# Global logger instance
-logger = None
 
 # TurtleBotSim class
 class TurtleBotSim:
@@ -118,20 +71,12 @@ class TurtleBotSim:
         self.trajectory = trajectory
         self.navigation_active = True
         
-        if logger:
-            logger.info(f"Navigation started with {len(trajectory)} waypoints")
-        
         for i, point in enumerate(trajectory):
             if not self.navigation_active:  # Allow stopping navigation
-                if logger:
-                    logger.info("Navigation stopped early")
                 break
                 
             self.heading = np.atan2(point[1]-self.position[1], point[0]-self.position[0])
             self.position = point
-            
-            if logger and i % 5 == 0:  # Log every 5th waypoint to avoid spam
-                logger.debug(f"Waypoint {i+1}/{len(trajectory)}: ({point[0]:.2f}, {point[1]:.2f})")
             
             if self.standard_navigation:
                 self.publish_pose()
@@ -151,8 +96,6 @@ class TurtleBotSim:
                 time.sleep(0.5)
         
         self.navigation_active = False
-        if logger:
-            logger.info(f"Navigation completed. Final position: ({self.position[0]:.2f}, {self.position[1]:.2f})")
 
     def spin(self, duration, angle):
         self.angle += angle
@@ -402,9 +345,6 @@ def update_plots(n):
 def toggle_lidar(n_clicks):
     if n_clicks:
         sim.lidar_occluded = not sim.lidar_occluded
-        status = "ON" if sim.lidar_occluded else "OFF"
-        if logger:
-            logger.info(f"LiDAR occlusion toggled: {status}")
     return f"Toggle LiDAR Occlusion ({'ON' if sim.lidar_occluded else 'OFF'})"
 
 # Callback for navigation mode toggle
@@ -415,9 +355,6 @@ def toggle_lidar(n_clicks):
 def toggle_nav_mode(n_clicks):
     if n_clicks:
         sim.standard_navigation = not sim.standard_navigation
-        mode = "STANDARD" if sim.standard_navigation else "SPIN_CONFIG"
-        if logger:
-            logger.info(f"Navigation mode changed to: {mode}")
     mode = "STANDARD" if sim.standard_navigation else "SPIN_CONFIG"
     return f"Mode: {mode}"
 
@@ -429,8 +366,6 @@ def toggle_nav_mode(n_clicks):
 def stop_navigation(n_clicks):
     if n_clicks:
         sim.stop_navigation()
-        if logger:
-            logger.info("Navigation stopped by user")
     return "Stop Navigation"
 
 # Callback for manual navigation
@@ -444,9 +379,6 @@ def manual_navigate(n_clicks, target_x, target_y):
     if n_clicks and target_x is not None and target_y is not None:
         target_coords = [target_x, target_y]
         trajectory = astar(sim.position, target_coords, sim.obstacles)
-        
-        if logger:
-            logger.info(f"Manual navigation started to ({target_x}, {target_y})")
         
         # Start navigation in a separate thread
         nav_thread = threading.Thread(target=sim.navigate_to, args=(trajectory,))
@@ -467,9 +399,6 @@ def handle_map_click(clickData):
         target_coords = [point['x'], point['y']]
         trajectory = astar(sim.position, target_coords, sim.obstacles)
         
-        if logger:
-            logger.info(f"Map click navigation to ({point['x']:.2f}, {point['y']:.2f})")
-        
         # Start navigation in a separate thread
         nav_thread = threading.Thread(target=sim.navigate_to, args=(trajectory,))
         nav_thread.daemon = True
@@ -487,29 +416,20 @@ def on_message(message):
             duration = plan.get("duration")
             if duration == 0.0:
                 sim.standard_navigation = True
-                if logger:
-                    logger.info("External command: Standard navigation enabled")
             else:
                 sim.standard_navigation = False
                 sim.angle = plan.get("omega", 90)
-                if logger:
-                    logger.info(f"External command: Spin config enabled (omega={sim.angle})")
     except json.JSONDecodeError:
         sim.standard_navigation = True
-        if logger:
-            logger.warning("Invalid JSON in spin config message")
         print("Invalid JSON in spin config")
 
 # Initialize MQTT client
 def initialize_client():
-    global client, logger
+    global client
     try:
         # Get Redis configuration from environment variables
         redis_host = os.getenv('REDIS_HOST', 'localhost')
         redis_port = int(os.getenv('REDIS_PORT', '6379'))
-        
-        # Get container name (defaults to hostname if not in container)
-        container_name = os.getenv('HOSTNAME', socket.gethostname())
         
         client = CommunicationManager({
             "protocol": "redis", 
@@ -520,20 +440,12 @@ def initialize_client():
         client.start()
         sim.client = client
         
-        # Initialize Redis logger
-        logger = RedisLogger(client, container_name)
-        logger.info(f"Connected to Redis at {redis_host}:{redis_port}")
-        logger.info(f"Container: {container_name}")
-        logger.info("TurtleBot Dash Simulator initialized")
-        
         print(f"✅ Connected to Redis at {redis_host}:{redis_port}")
-        print(f"📝 Logging to Redis key: {container_name}:logs")
         
     except Exception as e:
         print(f"⚠️  Failed to initialize communication client: {e}")
         print("📝 Simulator will run without external communication")
         client = None
-        logger = None
 
 if __name__ == "__main__":
     # Get configuration from environment variables
@@ -541,13 +453,8 @@ if __name__ == "__main__":
     dash_port = int(os.getenv('DASH_PORT', '8050'))
     dash_debug = os.getenv('DASH_DEBUG', 'False').lower() == 'true'
     
-    # Initialize MQTT client and logger
+    # Initialize MQTT client
     initialize_client()
-    
-    if logger:
-        logger.info("Starting TurtleBot Dash Simulator")
-        logger.info(f"Dashboard configuration: {dash_host}:{dash_port}")
-        logger.info(f"Debug mode: {dash_debug}")
     
     print(f"🚀 Starting TurtleBot Dash Simulator")
     print(f"🌐 Dashboard will be available at: http://{dash_host}:{dash_port}")
@@ -557,9 +464,4 @@ if __name__ == "__main__":
         # Run the Dash app
         app.run(debug=dash_debug, host=dash_host, port=dash_port)
     except Exception as e:
-        if logger:
-            logger.error(f"Failed to start Dash server: {e}")
         print(f"❌ Failed to start server: {e}")
-    finally:
-        if logger:
-            logger.info("TurtleBot Dash Simulator shutting down")
