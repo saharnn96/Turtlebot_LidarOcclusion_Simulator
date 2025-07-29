@@ -12,8 +12,38 @@ import dash
 from dash import dcc, html, Input, Output, State, callback_context
 import dash_bootstrap_components as dbc
 from rpio.clientLibraries.rpclpy.CommunicationManager import CommunicationManager
+import logging
+import redis
 
-# MQTT setup
+
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Redis log handler
+class RedisLogHandler(logging.Handler):
+    def __init__(self, redis_host='localhost', redis_port=6379, key='Simulator:logs'):
+        super().__init__()
+        self.redis = redis.StrictRedis(host=os.getenv('REDIS_HOST', 'localhost'), port=int(os.getenv('REDIS_PORT', '6379')), decode_responses=True)
+        self.key = key
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.redis.lpush(self.key, msg)
+        except Exception:
+            self.handleError(record)
+
+# Attach Redis handler to root logger
+redis_handler = RedisLogHandler()
+redis_handler.setLevel(logging.INFO)
+redis_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S'))
+logging.getLogger().addHandler(redis_handler)
+
 MQTT_BROKER = "localhost"
 POSE_TOPIC = "/pose"
 SCAN_TOPIC = "/Scan"
@@ -32,6 +62,7 @@ class TurtleBotSim:
         self.trajectory = []
         self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
         self.navigation_active = False
+        logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
         obstacles = []
@@ -47,12 +78,15 @@ class TurtleBotSim:
                 "y": self.position[1], 
                 "angle": self.angle
             }))
+            logging.debug(f"Published pose: x={self.position[0]}, y={self.position[1]}, angle={self.angle}")
 
     def publish_scan(self):
         if self.lidar_occluded:
             self.lidar_data[0:300] = [float('inf') for _ in range(300)]
+            logging.info("Lidar occlusion active: first 300 readings set to inf")
         else:
             self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
+            logging.debug("Lidar scan published (not occluded)")
         
         lidar_data = {
             'angle_min': -3.124,
@@ -70,14 +104,12 @@ class TurtleBotSim:
     def navigate_to(self, trajectory):
         self.trajectory = trajectory
         self.navigation_active = True
-        
+        logging.info(f"Navigation started with {len(trajectory)} waypoints.")
         for i, point in enumerate(trajectory):
             if not self.navigation_active:  # Allow stopping navigation
                 break
-                
             self.heading = np.atan2(point[1]-self.position[1], point[0]-self.position[0])
             self.position = point
-            
             if self.standard_navigation:
                 self.publish_pose()
                 self.publish_scan()
@@ -94,13 +126,14 @@ class TurtleBotSim:
                 self.publish_pose()
                 self.publish_scan()
                 time.sleep(0.5)
-        
         self.navigation_active = False
+        logging.info(f"Navigation ended. Final position: {self.position}")
 
     def spin(self, duration, angle):
         self.angle += angle
         self.publish_pose()
         time.sleep(duration)
+        logging.info(f"Spin executed: duration={duration}, angle={angle}")
 
     def stop_navigation(self):
         self.navigation_active = False
@@ -345,6 +378,7 @@ def update_plots(n):
 def toggle_lidar(n_clicks):
     if n_clicks:
         sim.lidar_occluded = not sim.lidar_occluded
+        logging.info(f"Lidar occlusion toggled: {'ON' if sim.lidar_occluded else 'OFF'}")
     return f"Toggle LiDAR Occlusion ({'ON' if sim.lidar_occluded else 'OFF'})"
 
 # Callback for navigation mode toggle
@@ -355,6 +389,7 @@ def toggle_lidar(n_clicks):
 def toggle_nav_mode(n_clicks):
     if n_clicks:
         sim.standard_navigation = not sim.standard_navigation
+        logging.info(f"Navigation mode toggled: {'STANDARD' if sim.standard_navigation else 'SPIN_CONFIG'}")
     mode = "STANDARD" if sim.standard_navigation else "SPIN_CONFIG"
     return f"Mode: {mode}"
 
@@ -366,6 +401,7 @@ def toggle_nav_mode(n_clicks):
 def stop_navigation(n_clicks):
     if n_clicks:
         sim.stop_navigation()
+        logging.info("Navigation stopped by user.")
     return "Stop Navigation"
 
 # Callback for manual navigation
@@ -379,12 +415,11 @@ def manual_navigate(n_clicks, target_x, target_y):
     if n_clicks and target_x is not None and target_y is not None:
         target_coords = [target_x, target_y]
         trajectory = astar(sim.position, target_coords, sim.obstacles)
-        
+        logging.info(f"Manual navigation requested to ({target_x}, {target_y})")
         # Start navigation in a separate thread
         nav_thread = threading.Thread(target=sim.navigate_to, args=(trajectory,))
         nav_thread.daemon = True
         nav_thread.start()
-        
         return f"Navigating to ({target_x}, {target_y})"
     return "Navigate to Target"
 
@@ -398,12 +433,11 @@ def handle_map_click(clickData):
         point = clickData['points'][0]
         target_coords = [point['x'], point['y']]
         trajectory = astar(sim.position, target_coords, sim.obstacles)
-        
+        logging.info(f"Map click navigation requested to ({point['x']}, {point['y']})")
         # Start navigation in a separate thread
         nav_thread = threading.Thread(target=sim.navigate_to, args=(trajectory,))
         nav_thread.daemon = True
         nav_thread.start()
-        
         return {'x': point['x'], 'y': point['y']}
     return {}
 
@@ -419,9 +453,10 @@ def on_message(message):
             else:
                 sim.standard_navigation = False
                 sim.angle = plan.get("omega", 90)
+            logging.info(f"Received spin config: duration={duration}, omega={plan.get('omega', 90)}")
     except json.JSONDecodeError:
         sim.standard_navigation = True
-        print("Invalid JSON in spin config")
+        logging.error("Invalid JSON in spin config message received.")
 
 # Initialize MQTT client
 def initialize_client():
@@ -430,7 +465,6 @@ def initialize_client():
         # Get Redis configuration from environment variables
         redis_host = os.getenv('REDIS_HOST', 'localhost')
         redis_port = int(os.getenv('REDIS_PORT', '6379'))
-        
         client = CommunicationManager({
             "protocol": "redis", 
             "host": redis_host, 
@@ -439,12 +473,10 @@ def initialize_client():
         client.subscribe(SPIN_CONFIG_TOPIC, callback=on_message)
         client.start()
         sim.client = client
-        
-        print(f"✅ Connected to Redis at {redis_host}:{redis_port}")
-        
+        logging.info(f"Connected to Redis at {redis_host}:{redis_port}")
     except Exception as e:
-        print(f"⚠️  Failed to initialize communication client: {e}")
-        print("📝 Simulator will run without external communication")
+        logging.warning(f"Failed to initialize communication client: {e}")
+        logging.info("Simulator will run without external communication")
         client = None
 
 if __name__ == "__main__":
@@ -452,16 +484,13 @@ if __name__ == "__main__":
     dash_host = os.getenv('DASH_HOST', '0.0.0.0')
     dash_port = int(os.getenv('DASH_PORT', '8050'))
     dash_debug = os.getenv('DASH_DEBUG', 'False').lower() == 'true'
-    
     # Initialize MQTT client
     initialize_client()
-    
-    print(f"🚀 Starting TurtleBot Dash Simulator")
-    print(f"🌐 Dashboard will be available at: http://{dash_host}:{dash_port}")
-    print(f"🐛 Debug mode: {dash_debug}")
-    
+    logging.info(f"Starting TurtleBot Dash Simulator")
+    logging.info(f"Dashboard will be available at: http://{dash_host}:{dash_port}")
+    logging.info(f"Debug mode: {dash_debug}")
     try:
         # Run the Dash app
         app.run(debug=dash_debug, host=dash_host, port=dash_port)
     except Exception as e:
-        print(f"❌ Failed to start server: {e}")
+        logging.error(f"Failed to start server: {e}")
