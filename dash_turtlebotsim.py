@@ -62,6 +62,7 @@ class TurtleBotSim:
         self.trajectory = []
         self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
         self.navigation_active = False
+        self.random_walk_active = False  # NEW: flag for random walk mode
         logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
@@ -108,7 +109,8 @@ class TurtleBotSim:
         for i, point in enumerate(trajectory):
             if not self.navigation_active:  # Allow stopping navigation
                 break
-            self.heading = np.atan2(point[1]-self.position[1], point[0]-self.position[0])
+            # Use numpy.arctan2 (correct function name) to compute heading
+            self.heading = np.arctan2(point[1]-self.position[1], point[0]-self.position[0])
             self.position = point
             if self.standard_navigation:
                 self.publish_pose()
@@ -135,8 +137,37 @@ class TurtleBotSim:
         time.sleep(duration)
         logging.info(f"Spin executed: duration={duration}, angle={angle}")
 
+    def random_walk_loop(self):
+        """Continuously pick random targets and navigate until stopped."""
+        if self.random_walk_active:
+            # already running
+            return
+        self.random_walk_active = True
+        self.navigation_active = True
+        logging.info("Random walk started.")
+        try:
+            while self.random_walk_active:
+                target = [random.uniform(-self.map_size, self.map_size),
+                          random.uniform(-self.map_size, self.map_size)]
+                trajectory = astar(self.position, target, self.obstacles)
+                self.trajectory = trajectory
+                logging.info(f"Random walk target: ({target[0]:.2f}, {target[1]:.2f}) with {len(trajectory)} waypoints")
+                for point in trajectory:
+                    if not self.random_walk_active:
+                        break
+                    self.heading = np.arctan2(point[1]-self.position[1], point[0]-self.position[0])
+                    self.position = point
+                    self.publish_pose()
+                    self.publish_scan()
+                    time.sleep(0.5)
+        finally:
+            self.navigation_active = False
+            self.random_walk_active = False
+            logging.info("Random walk stopped.")
+
     def stop_navigation(self):
         self.navigation_active = False
+        self.random_walk_active = False  # ensure random walk loop exits
 
 # A* Pathfinding (Simple Implementation)
 def astar(start, end, obstacles):
@@ -213,6 +244,10 @@ app.layout = dbc.Container([
                     dbc.Button("Navigate to Target", 
                              id="navigate-btn", 
                              color="success", 
+                             className="mt-2 w-100"),
+                    dbc.Button("Random Walk (OFF)", 
+                             id="random-walk-btn", 
+                             color="secondary", 
                              className="mt-2 w-100"),
                     
                     html.Hr(),
@@ -365,6 +400,7 @@ def update_plots(n):
         html.P(f"Heading: {np.degrees(sim.heading):.1f}°"),
         html.P(f"Angle: {sim.angle:.1f}"),
         html.P(f"Navigation: {'Active' if sim.navigation_active else 'Idle'}"),
+        html.P(f"Random Walk: {'ON' if sim.random_walk_active else 'OFF'}"),
         html.P(f"Obstacles: {len(sim.obstacles)}")
     ])
     
@@ -440,6 +476,27 @@ def handle_map_click(clickData):
         nav_thread.start()
         return {'x': point['x'], 'y': point['y']}
     return {}
+
+# New callback for random walk
+@app.callback(
+    Output('random-walk-btn', 'children'),
+    [Input('random-walk-btn', 'n_clicks')]
+)
+def start_stop_random_walk(n_clicks):
+    if n_clicks:
+        if sim.random_walk_active:
+            sim.stop_navigation()
+            return "Random Walk (OFF)"
+        else:
+            # stop any current navigation and start random walk
+            if sim.navigation_active:
+                sim.stop_navigation()
+                time.sleep(0.1)
+            walker_thread = threading.Thread(target=sim.random_walk_loop)
+            walker_thread.daemon = True
+            walker_thread.start()
+            return "Random Walk (ON)"
+    return "Random Walk (ON)" if sim.random_walk_active else "Random Walk (OFF)"
 
 # MQTT message handler
 def on_message(message):
