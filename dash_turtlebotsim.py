@@ -157,9 +157,22 @@ class TurtleBotSim:
                         break
                     self.heading = np.arctan2(point[1]-self.position[1], point[0]-self.position[0])
                     self.position = point
-                    self.publish_pose()
-                    self.publish_scan()
-                    time.sleep(0.5)
+                    if self.standard_navigation:
+                        self.publish_pose()
+                        self.publish_scan()
+                        time.sleep(0.5)
+                    else:
+                        self.publish_pose()
+                        self.publish_scan()
+                        time.sleep(0.5)
+                        self.heading = self.heading + self.angle
+                        self.publish_pose()
+                        self.publish_scan()
+                        time.sleep(0.5)
+                        self.heading = self.heading - self.angle
+                        self.publish_pose()
+                        self.publish_scan()
+                        time.sleep(0.5)
         finally:
             self.navigation_active = False
             self.random_walk_active = False
