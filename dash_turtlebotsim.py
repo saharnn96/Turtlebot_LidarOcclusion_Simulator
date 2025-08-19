@@ -48,6 +48,8 @@ MQTT_BROKER = "localhost"
 POSE_TOPIC = "/pose"
 SCAN_TOPIC = "/Scan"
 SPIN_CONFIG_TOPIC = "/spin_config"
+TRUSTWORTHINESS_TOPIC = "maple"
+
 
 # TurtleBotSim class
 class TurtleBotSim:
@@ -63,6 +65,8 @@ class TurtleBotSim:
         self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
         self.navigation_active = False
         self.random_walk_active = False  # NEW: flag for random walk mode
+        self.trustworthiness_status = True  # NEW: trustworthiness status from maple topic
+        self.failure_action = "apply_adaptation"  # NEW: action to take on trustworthiness failure
         logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
@@ -199,6 +203,9 @@ sim = TurtleBotSim()
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.title = "TurtleBot4 Simulation Dashboard"
 
+# Clear any potential cache issues
+app.config.suppress_callback_exceptions = True
+
 # App layout
 app.layout = dbc.Container([
     dbc.Row([
@@ -223,6 +230,10 @@ app.layout = dbc.Container([
                         dbc.Badge("Navigation Mode", color="secondary", className="me-2"),
                         dbc.Badge(id="nav-mode-status", color="info", className="mb-3"),
                     ]),
+                    html.Div([
+                        dbc.Badge("Trustworthiness", color="secondary", className="me-2"),
+                        dbc.Badge(id="trustworthiness-status", color="success", className="mb-3"),
+                    ]),
                     
                     # Control buttons
                     dbc.ButtonGroup([
@@ -238,7 +249,27 @@ app.layout = dbc.Container([
                                  id="stop-nav-btn", 
                                  color="danger", 
                                  className="mb-2"),
+                        dbc.Button("Toggle Trustworthiness", 
+                                 id="toggle-trust-btn", 
+                                 color="secondary", 
+                                 className="mb-2"),
                     ], vertical=True, className="d-grid gap-2"),
+                    
+                    html.Hr(),
+                    
+                    # Trustworthiness failure action
+                    html.H6("Trustworthiness Failure Action"),
+                    dbc.Label("If trustworthiness fails:"),
+                    dcc.Dropdown(
+                        id="failure-action-dropdown",
+                        options=[
+                            {"label": "Apply Adaptation", "value": "apply_adaptation"},
+                            {"label": "Stop Robot", "value": "stop_robot"},
+                            {"label": "Continue Standard Navigation", "value": "continue_standard"}
+                        ],
+                        value="apply_adaptation",
+                        className="mb-3"
+                    ),
                     
                     html.Hr(),
                     
@@ -314,6 +345,8 @@ app.layout = dbc.Container([
      Output('lidar-status', 'color'),
      Output('nav-mode-status', 'children'),
      Output('nav-mode-status', 'color'),
+     Output('trustworthiness-status', 'children'),
+     Output('trustworthiness-status', 'color'),
      Output('robot-status', 'children')],
     [Input('interval-component', 'n_intervals')]
 )
@@ -408,16 +441,20 @@ def update_plots(n):
     nav_mode = "STANDARD" if sim.standard_navigation else "SPIN_CONFIG"
     nav_color = "primary" if sim.standard_navigation else "warning"
     
+    trustworthiness_status = "TRUSTED" if sim.trustworthiness_status else "UNTRUSTED"
+    trustworthiness_color = "success" if sim.trustworthiness_status else "danger"
+    
     robot_status = html.Div([
         html.P(f"Position: ({sim.position[0]:.2f}, {sim.position[1]:.2f})"),
         html.P(f"Heading: {np.degrees(sim.heading):.1f}°"),
         html.P(f"Angle: {sim.angle:.1f}"),
         html.P(f"Navigation: {'Active' if sim.navigation_active else 'Idle'}"),
         html.P(f"Random Walk: {'ON' if sim.random_walk_active else 'OFF'}"),
+        html.P(f"Failure Action: {sim.failure_action.replace('_', ' ').title()}"),
         html.P(f"Obstacles: {len(sim.obstacles)}")
     ])
     
-    return map_fig, lidar_fig, lidar_status, lidar_color, nav_mode, nav_color, robot_status
+    return map_fig, lidar_fig, lidar_status, lidar_color, nav_mode, nav_color, trustworthiness_status, trustworthiness_color, robot_status
 
 # Callback for LiDAR toggle
 @app.callback(
@@ -452,6 +489,18 @@ def stop_navigation(n_clicks):
         sim.stop_navigation()
         logging.info("Navigation stopped by user.")
     return "Stop Navigation"
+
+# Callback for trustworthiness toggle (for testing)
+@app.callback(
+    Output('toggle-trust-btn', 'children'),
+    [Input('toggle-trust-btn', 'n_clicks')]
+)
+def toggle_trustworthiness(n_clicks):
+    if n_clicks:
+        sim.trustworthiness_status = not sim.trustworthiness_status
+        status_text = "TRUSTED" if sim.trustworthiness_status else "UNTRUSTED"
+        logging.info(f"Trustworthiness manually toggled to: {status_text}")
+    return f"Trust: {'ON' if sim.trustworthiness_status else 'OFF'}"
 
 # Callback for manual navigation
 @app.callback(
@@ -511,8 +560,19 @@ def start_stop_random_walk(n_clicks):
             return "Random Walk (ON)"
     return "Random Walk (ON)" if sim.random_walk_active else "Random Walk (OFF)"
 
-# MQTT message handler
-def on_message(message):
+# Callback for failure action dropdown
+@app.callback(
+    Output('failure-action-dropdown', 'value'),
+    [Input('failure-action-dropdown', 'value')]
+)
+def update_failure_action(selected_value):
+    if selected_value:
+        sim.failure_action = selected_value
+        logging.info(f"Failure action updated to: {selected_value}")
+    return selected_value
+
+# MQTT message handlers
+def on_spin_config_message(message):
     try:
         payload = json.loads(message)
         if payload.get("commands"):
@@ -521,12 +581,39 @@ def on_message(message):
             if duration == 0.0:
                 sim.standard_navigation = True
             else:
-                sim.standard_navigation = False
-                sim.angle = plan.get("omega", 90)
-            logging.info(f"Received spin config: duration={duration}, omega={plan.get('omega', 90)}")
+                # Check trustworthiness status and apply failure action
+                if not sim.trustworthiness_status:
+                    if sim.failure_action == "apply_adaptation":
+                        sim.standard_navigation = False
+                        sim.angle = plan.get("omega", 90)
+                        logging.info(f"Trustworthiness failed - applying adaptation: duration={duration}, omega={plan.get('omega', 90)}")
+                    elif sim.failure_action == "stop_robot":
+                        sim.stop_navigation()
+                        logging.info("Trustworthiness failed - stopping robot")
+                        return
+                    elif sim.failure_action == "continue_standard":
+                        sim.standard_navigation = True
+                        logging.info("Trustworthiness failed - continuing standard navigation")
+                        return
+                else:
+                    sim.standard_navigation = False
+                    sim.angle = plan.get("omega", 90)
+                    logging.info(f"Received spin config: duration={duration}, omega={plan.get('omega', 90)}")
     except json.JSONDecodeError:
         sim.standard_navigation = True
         logging.error("Invalid JSON in spin config message received.")
+
+def on_trustworthiness_message(message):
+    try:
+        payload = json.loads(message)
+        if "Bool" in payload:
+            old_status = sim.trustworthiness_status
+            sim.trustworthiness_status = payload["Bool"]
+            if old_status != sim.trustworthiness_status:
+                status_text = "TRUSTED" if sim.trustworthiness_status else "UNTRUSTED"
+                logging.info(f"Trustworthiness status changed to: {status_text}")
+    except json.JSONDecodeError:
+        logging.error("Invalid JSON in trustworthiness message received.")
 
 # Initialize MQTT client
 def initialize_client():
@@ -540,10 +627,12 @@ def initialize_client():
             "host": redis_host, 
             "port": redis_port
         })
-        client.subscribe(SPIN_CONFIG_TOPIC, callback=on_message)
+        client.subscribe(SPIN_CONFIG_TOPIC, callback=on_spin_config_message)
+        client.subscribe(TRUSTWORTHINESS_TOPIC, callback=on_trustworthiness_message)
         client.start()
         sim.client = client
         logging.info(f"Connected to Redis at {redis_host}:{redis_port}")
+        logging.info(f"Subscribed to topics: {SPIN_CONFIG_TOPIC}, {TRUSTWORTHINESS_TOPIC}")
     except Exception as e:
         logging.warning(f"Failed to initialize communication client: {e}")
         logging.info("Simulator will run without external communication")
