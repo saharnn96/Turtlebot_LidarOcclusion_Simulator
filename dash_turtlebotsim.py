@@ -476,8 +476,7 @@ def toggle_nav_mode(n_clicks):
     if n_clicks:
         sim.standard_navigation = not sim.standard_navigation
         logging.info(f"Navigation mode toggled: {'STANDARD' if sim.standard_navigation else 'SPIN_CONFIG'}")
-    mode = "STANDARD" if sim.standard_navigation else "SPIN_CONFIG"
-    return f"Mode: {mode}"
+    return "Toggle Navigation Mode"
 
 # Callback for stopping navigation
 @app.callback(
@@ -500,7 +499,7 @@ def toggle_trustworthiness(n_clicks):
         sim.trustworthiness_status = not sim.trustworthiness_status
         status_text = "TRUSTED" if sim.trustworthiness_status else "UNTRUSTED"
         logging.info(f"Trustworthiness manually toggled to: {status_text}")
-    return f"Trust: {'ON' if sim.trustworthiness_status else 'OFF'}"
+    return "Toggle Trustworthiness"
 
 # Callback for manual navigation
 @app.callback(
