@@ -66,7 +66,7 @@ class TurtleBotSim:
         self.navigation_active = False
         self.random_walk_active = False  # NEW: flag for random walk mode
         self.trustworthiness_status = True  # NEW: trustworthiness status from maple topic
-        self.failure_action = "apply_adaptation"  # NEW: action to take on trustworthiness failure
+        self.failure_action = "stop_robot"  # NEW: action to take on trustworthiness failure
         logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
@@ -303,25 +303,24 @@ app.layout = dbc.Container([
             ])
         ], width=3),
         
-        # Visualization Panel
+        # Visualization Panel (Map + LiDAR)
         dbc.Col([
+            # Map visualization
             dbc.Card([
                 dbc.CardHeader("Simulation Visualization"),
                 dbc.CardBody([
-                    dcc.Graph(id="map-plot", style={"height": "500px"}),
+                    dcc.Graph(id="map-plot", style={"height": "400px"}),
                 ])
-            ])
-        ], width=6),
-        
-        # LiDAR Panel
-        dbc.Col([
+            ], className="mb-3"),
+            
+            # LiDAR visualization
             dbc.Card([
                 dbc.CardHeader("LiDAR Data"),
                 dbc.CardBody([
-                    dcc.Graph(id="lidar-plot", style={"height": "500px"}),
+                    dcc.Graph(id="lidar-plot", style={"height": "400px"}),
                 ])
             ])
-        ], width=3),
+        ], width=9),
     ]),
     
     # Auto-refresh interval
@@ -408,7 +407,7 @@ def update_plots(n):
         xaxis=dict(range=[-sim.map_size, sim.map_size]),
         yaxis=dict(range=[-sim.map_size, sim.map_size]),
         showlegend=True,
-        height=450,
+        height=350,
         hovermode='closest'
     )
     
@@ -431,7 +430,7 @@ def update_plots(n):
             radialaxis=dict(range=[0, 10], showticklabels=True),
             angularaxis=dict(direction="counterclockwise", period=360)
         ),
-        height=450
+        height=350
     )
     
     # Status updates
@@ -611,6 +610,14 @@ def on_trustworthiness_message(message):
             if old_status != sim.trustworthiness_status:
                 status_text = "TRUSTED" if sim.trustworthiness_status else "UNTRUSTED"
                 logging.info(f"Trustworthiness status changed to: {status_text}")
+        # If status changed from TRUSTED to UNTRUSTED, apply failure action
+        if old_status and not sim.trustworthiness_status:
+            if sim.failure_action == "stop_robot":
+                sim.stop_navigation()
+                logging.info("Trustworthiness failed - stopping robot")
+            elif sim.failure_action == "continue_standard":
+                sim.standard_navigation = True
+                logging.info("Trustworthiness failed - continuing standard navigation")
     except json.JSONDecodeError:
         logging.error("Invalid JSON in trustworthiness message received.")
 
