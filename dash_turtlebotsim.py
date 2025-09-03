@@ -79,6 +79,9 @@ class TurtleBotSim:
         }
         # Custom occlusion ranges (start_angle, end_angle)
         self.custom_occlusion_ranges = []
+        # Random occlusion feature
+        self.random_occlusion_active = False
+        self.random_occlusion_thread = None
         logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
@@ -184,6 +187,9 @@ class TurtleBotSim:
             self.lidar_occlusion_sectors[sector] = False
         self.custom_occlusion_ranges.clear()
         self.lidar_occluded = False
+        # Stop random occlusion if active
+        if self.random_occlusion_active:
+            self.stop_random_occlusion()
         logging.info("All LiDAR occlusions cleared")
 
     def get_occlusion_status(self):
@@ -201,7 +207,64 @@ class TurtleBotSim:
             custom_ranges = [f"{start}-{end}°" for start, end in self.custom_occlusion_ranges]
             status_parts.append(f"Custom: {', '.join(custom_ranges)}")
         
+        if self.random_occlusion_active:
+            status_parts.append("Random: ON")
+        
         return " | ".join(status_parts) if status_parts else "No occlusions"
+
+    def start_random_occlusion(self):
+        """Start random occlusion that changes every 3 seconds."""
+        if self.random_occlusion_active:
+            return  # Already running
+        
+        self.random_occlusion_active = True
+        self.random_occlusion_thread = threading.Thread(target=self._random_occlusion_loop)
+        self.random_occlusion_thread.daemon = True
+        self.random_occlusion_thread.start()
+        logging.info("Random LiDAR occlusion started - changes every 3 seconds")
+
+    def stop_random_occlusion(self):
+        """Stop random occlusion."""
+        self.random_occlusion_active = False
+        if self.random_occlusion_thread:
+            self.random_occlusion_thread.join(timeout=1)
+        logging.info("Random LiDAR occlusion stopped")
+
+    def _random_occlusion_loop(self):
+        """Internal method that runs the random occlusion loop."""
+        import time
+        import random
+        
+        while self.random_occlusion_active:
+            try:
+                # Clear previous random occlusions
+                self.clear_custom_occlusions()
+                
+                # Generate 1-3 random occlusion sectors
+                num_occlusions = random.randint(1, 3)
+                
+                for _ in range(num_occlusions):
+                    # Generate random start angle (0-359)
+                    start_angle = random.randint(0, 359)
+                    # Generate random arc size (15-90 degrees)
+                    arc_size = random.randint(15, 90)
+                    end_angle = (start_angle + arc_size) % 360
+                    
+                    # Add the random occlusion
+                    self.add_custom_occlusion(start_angle, end_angle)
+                
+                logging.debug(f"Applied {num_occlusions} random occlusions")
+                
+                # Wait for 3 seconds before next change
+                time.sleep(3.0)
+                
+            except Exception as e:
+                logging.error(f"Error in random occlusion loop: {e}")
+                break
+        
+        # Clean up when stopping
+        self.clear_custom_occlusions()
+        logging.info("Random occlusion loop ended")
 
     def navigate_to(self, trajectory):
         self.trajectory = trajectory
@@ -282,6 +345,8 @@ class TurtleBotSim:
     def stop_navigation(self):
         self.navigation_active = False
         self.random_walk_active = False  # ensure random walk loop exits
+        # Optional: stop random occlusion when navigation stops
+        # self.stop_random_occlusion()
 
 # A* Pathfinding (Simple Implementation)
 def astar(start, end, obstacles):
@@ -456,6 +521,15 @@ app.layout = dbc.Container([
                             "Clear All Occlusions",
                             id="clear-all-occlusions-btn",
                             color="danger",
+                            size="sm",
+                            className="w-100 mb-2"
+                        ),
+                        
+                        # Random occlusion control
+                        dbc.Button(
+                            "Random Occlusion (OFF)",
+                            id="random-occlusion-btn",
+                            color="info",
                             size="sm",
                             className="w-100 mb-2"
                         ),
@@ -894,6 +968,30 @@ def reset_checkboxes_on_clear_all(n_clicks):
     if n_clicks:
         return [], []
     return [], []
+
+# Callback for random occlusion
+@app.callback(
+    Output('random-occlusion-btn', 'children'),
+    [Input('random-occlusion-btn', 'n_clicks')]
+)
+def toggle_random_occlusion(n_clicks):
+    if n_clicks:
+        if sim.random_occlusion_active:
+            sim.stop_random_occlusion()
+            return "Random Occlusion (OFF)"
+        else:
+            sim.start_random_occlusion()
+            return "Random Occlusion (ON)"
+    return "Random Occlusion (OFF)"
+
+@app.callback(
+    Output('random-occlusion-btn', 'color'),
+    [Input('random-occlusion-btn', 'n_clicks')]
+)
+def update_random_occlusion_color(n_clicks):
+    if n_clicks and sim.random_occlusion_active:
+        return "success"
+    return "info"
 
 # Initialize MQTT client
 def initialize_client():
