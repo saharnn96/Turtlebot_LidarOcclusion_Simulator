@@ -67,6 +67,18 @@ class TurtleBotSim:
         self.random_walk_active = False  # NEW: flag for random walk mode
         self.trustworthiness_status = True  # NEW: trustworthiness status from maple topic
         self.failure_action = "stop_robot"  # NEW: action to take on trustworthiness failure
+        # NEW: Selective LiDAR occlusion
+        self.lidar_occlusion_sectors = {
+            'front': False,      # 315-360 and 0-45 degrees
+            'front_left': False, # 45-90 degrees
+            'left': False,       # 90-135 degrees
+            'back_left': False,  # 135-180 degrees
+            'back': False,       # 180-225 degrees
+            'back_right': False, # 225-270 degrees
+            'right': False,      # 270-315 degrees
+        }
+        # Custom occlusion ranges (start_angle, end_angle)
+        self.custom_occlusion_ranges = []
         logging.info("TurtleBotSim initialized with position (0, 0) and angle 1.0")
         
     def generate_obstacles(self, num_obstacles=5):
@@ -86,12 +98,25 @@ class TurtleBotSim:
             logging.debug(f"Published pose: x={self.position[0]}, y={self.position[1]}, angle={self.angle}")
 
     def publish_scan(self):
+        # Start with fresh random data
+        self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
+        
+        # Apply global occlusion (backward compatibility)
         if self.lidar_occluded:
             self.lidar_data[0:300] = [float('inf') for _ in range(300)]
-            logging.info("Lidar occlusion active: first 300 readings set to inf")
-        else:
-            self.lidar_data = [random.uniform(5, 10) for _ in range(360)]
-            logging.debug("Lidar scan published (not occluded)")
+            logging.info("Global lidar occlusion active: first 300 readings set to inf")
+        
+        # Apply selective sector occlusion
+        for sector, is_occluded in self.lidar_occlusion_sectors.items():
+            if is_occluded:
+                start_angle, end_angle = self.get_sector_range(sector)
+                self.occlude_angle_range(start_angle, end_angle)
+                logging.debug(f"Sector '{sector}' occluded: {start_angle}-{end_angle} degrees")
+        
+        # Apply custom occlusion ranges
+        for start_angle, end_angle in self.custom_occlusion_ranges:
+            self.occlude_angle_range(start_angle, end_angle)
+            logging.debug(f"Custom occlusion applied: {start_angle}-{end_angle} degrees")
         
         lidar_data = {
             'angle_min': -3.124,
@@ -105,6 +130,78 @@ class TurtleBotSim:
         
         if hasattr(self, 'client') and self.client:
             client.publish(SCAN_TOPIC, json.dumps(lidar_data))
+
+    def get_sector_range(self, sector):
+        """Get angle range for predefined sectors."""
+        sector_ranges = {
+            'front': (315, 45),      # Wraps around 0
+            'front_left': (45, 90),
+            'left': (90, 135),
+            'back_left': (135, 180),
+            'back': (180, 225),
+            'back_right': (225, 270),
+            'right': (270, 315),
+        }
+        return sector_ranges.get(sector, (0, 360))
+
+    def occlude_angle_range(self, start_angle, end_angle):
+        """Occlude LiDAR readings in the specified angle range."""
+        # Convert angles to array indices (0-359)
+        start_idx = int(start_angle)
+        end_idx = int(end_angle)
+        
+        if start_idx <= end_idx:
+            # Normal range
+            for i in range(start_idx, min(end_idx + 1, 360)):
+                self.lidar_data[i] = float('inf')
+        else:
+            # Wrap-around range (e.g., 315-45 degrees for front)
+            for i in range(start_idx, 360):
+                self.lidar_data[i] = float('inf')
+            for i in range(0, end_idx + 1):
+                self.lidar_data[i] = float('inf')
+
+    def toggle_sector_occlusion(self, sector):
+        """Toggle occlusion for a specific sector."""
+        if sector in self.lidar_occlusion_sectors:
+            self.lidar_occlusion_sectors[sector] = not self.lidar_occlusion_sectors[sector]
+            status = "ON" if self.lidar_occlusion_sectors[sector] else "OFF"
+            logging.info(f"Sector '{sector}' occlusion toggled: {status}")
+
+    def add_custom_occlusion(self, start_angle, end_angle):
+        """Add a custom occlusion range."""
+        self.custom_occlusion_ranges.append((start_angle, end_angle))
+        logging.info(f"Custom occlusion added: {start_angle}-{end_angle} degrees")
+
+    def clear_custom_occlusions(self):
+        """Clear all custom occlusion ranges."""
+        self.custom_occlusion_ranges.clear()
+        logging.info("All custom occlusions cleared")
+
+    def clear_all_occlusions(self):
+        """Clear all occlusions (sectors and custom)."""
+        for sector in self.lidar_occlusion_sectors:
+            self.lidar_occlusion_sectors[sector] = False
+        self.custom_occlusion_ranges.clear()
+        self.lidar_occluded = False
+        logging.info("All LiDAR occlusions cleared")
+
+    def get_occlusion_status(self):
+        """Get current occlusion status as a string."""
+        active_sectors = [sector for sector, active in self.lidar_occlusion_sectors.items() if active]
+        status_parts = []
+        
+        if self.lidar_occluded:
+            status_parts.append("Global: ON")
+        
+        if active_sectors:
+            status_parts.append(f"Sectors: {', '.join(active_sectors)}")
+        
+        if self.custom_occlusion_ranges:
+            custom_ranges = [f"{start}-{end}°" for start, end in self.custom_occlusion_ranges]
+            status_parts.append(f"Custom: {', '.join(custom_ranges)}")
+        
+        return " | ".join(status_parts) if status_parts else "No occlusions"
 
     def navigate_to(self, trajectory):
         self.trajectory = trajectory
@@ -273,6 +370,102 @@ app.layout = dbc.Container([
                     
                     html.Hr(),
                     
+                    # Selective LiDAR Occlusion Controls
+                    html.H6("Selective LiDAR Occlusion"),
+                    html.Div([
+                        html.P("Sector Controls:", className="mb-2 small text-muted"),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Checklist(
+                                    id="lidar-sector-checklist",
+                                    options=[
+                                        {"label": "Front", "value": "front"},
+                                        {"label": "Front-Left", "value": "front_left"},
+                                        {"label": "Left", "value": "left"},
+                                        {"label": "Back-Left", "value": "back_left"},
+                                    ],
+                                    value=[],
+                                    inline=False
+                                ),
+                            ], width=6),
+                            dbc.Col([
+                                dbc.Checklist(
+                                    id="lidar-sector-checklist-2",
+                                    options=[
+                                        {"label": "Back", "value": "back"},
+                                        {"label": "Back-Right", "value": "back_right"},
+                                        {"label": "Right", "value": "right"},
+                                    ],
+                                    value=[],
+                                    inline=False
+                                ),
+                            ], width=6),
+                        ]),
+                        
+                        html.Hr(className="my-2"),
+                        
+                        # Custom angle range occlusion
+                        html.P("Custom Angle Range:", className="mb-2 small text-muted"),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Start Angle (°):", className="small"),
+                                dbc.Input(
+                                    id="custom-start-angle",
+                                    type="number",
+                                    min=0,
+                                    max=359,
+                                    value=0,
+                                    size="sm"
+                                ),
+                            ], width=6),
+                            dbc.Col([
+                                dbc.Label("End Angle (°):", className="small"),
+                                dbc.Input(
+                                    id="custom-end-angle",
+                                    type="number",
+                                    min=0,
+                                    max=359,
+                                    value=45,
+                                    size="sm"
+                                ),
+                            ], width=6),
+                        ], className="mb-2"),
+                        
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Button(
+                                    "Add Custom Occlusion",
+                                    id="add-custom-occlusion-btn",
+                                    color="warning",
+                                    size="sm",
+                                    className="w-100"
+                                ),
+                            ], width=6),
+                            dbc.Col([
+                                dbc.Button(
+                                    "Clear Custom",
+                                    id="clear-custom-occlusion-btn",
+                                    color="secondary",
+                                    size="sm",
+                                    className="w-100"
+                                ),
+                            ], width=6),
+                        ], className="mb-2"),
+                        
+                        dbc.Button(
+                            "Clear All Occlusions",
+                            id="clear-all-occlusions-btn",
+                            color="danger",
+                            size="sm",
+                            className="w-100 mb-2"
+                        ),
+                        
+                        # Status display
+                        html.Div(id="occlusion-status", className="small text-info"),
+                    ]),
+                    
+                    html.Hr(),
+                    
                     # Manual position input
                     html.H6("Manual Navigation"),
                     dbc.Row([
@@ -346,7 +539,8 @@ app.layout = dbc.Container([
      Output('nav-mode-status', 'color'),
      Output('trustworthiness-status', 'children'),
      Output('trustworthiness-status', 'color'),
-     Output('robot-status', 'children')],
+     Output('robot-status', 'children'),
+     Output('occlusion-status', 'children')],
     [Input('interval-component', 'n_intervals')]
 )
 def update_plots(n):
@@ -453,7 +647,10 @@ def update_plots(n):
         html.P(f"Obstacles: {len(sim.obstacles)}")
     ])
     
-    return map_fig, lidar_fig, lidar_status, lidar_color, nav_mode, nav_color, trustworthiness_status, trustworthiness_color, robot_status
+    # Get current occlusion status
+    occlusion_status = sim.get_occlusion_status()
+    
+    return map_fig, lidar_fig, lidar_status, lidar_color, nav_mode, nav_color, trustworthiness_status, trustworthiness_color, robot_status, occlusion_status
 
 # Callback for LiDAR toggle
 @app.callback(
@@ -620,6 +817,83 @@ def on_trustworthiness_message(message):
                 logging.info("Trustworthiness failed - continuing standard navigation")
     except json.JSONDecodeError:
         logging.error("Invalid JSON in trustworthiness message received.")
+
+# Callbacks for selective LiDAR occlusion
+@app.callback(
+    Output('lidar-sector-checklist', 'value'),
+    [Input('lidar-sector-checklist', 'value')]
+)
+def update_sector_occlusion_1(selected_sectors):
+    # Update the first set of sectors
+    for sector in ['front', 'front_left', 'left', 'back_left']:
+        sim.lidar_occlusion_sectors[sector] = sector in selected_sectors
+    logging.info(f"Sector occlusion updated (group 1): {selected_sectors}")
+    return selected_sectors
+
+@app.callback(
+    Output('lidar-sector-checklist-2', 'value'),
+    [Input('lidar-sector-checklist-2', 'value')]
+)
+def update_sector_occlusion_2(selected_sectors):
+    # Update the second set of sectors
+    for sector in ['back', 'back_right', 'right']:
+        sim.lidar_occlusion_sectors[sector] = sector in selected_sectors
+    logging.info(f"Sector occlusion updated (group 2): {selected_sectors}")
+    return selected_sectors
+
+@app.callback(
+    Output('custom-start-angle', 'value'),
+    [Input('add-custom-occlusion-btn', 'n_clicks')],
+    [State('custom-start-angle', 'value'),
+     State('custom-end-angle', 'value')]
+)
+def add_custom_occlusion(n_clicks, start_angle, end_angle):
+    if n_clicks and start_angle is not None and end_angle is not None:
+        sim.add_custom_occlusion(start_angle, end_angle)
+        return 0  # Reset the start angle input
+    return start_angle
+
+@app.callback(
+    Output('custom-end-angle', 'value'),
+    [Input('add-custom-occlusion-btn', 'n_clicks')],
+    [State('custom-start-angle', 'value'),
+     State('custom-end-angle', 'value')]
+)
+def reset_custom_end_angle(n_clicks, start_angle, end_angle):
+    if n_clicks and start_angle is not None and end_angle is not None:
+        return 45  # Reset the end angle input
+    return end_angle
+
+@app.callback(
+    Output('add-custom-occlusion-btn', 'children'),
+    [Input('clear-custom-occlusion-btn', 'n_clicks')]
+)
+def clear_custom_occlusions(n_clicks):
+    if n_clicks:
+        sim.clear_custom_occlusions()
+    return "Add Custom Occlusion"
+
+@app.callback(
+    Output('clear-all-occlusions-btn', 'children'),
+    [Input('clear-all-occlusions-btn', 'n_clicks')]
+)
+def clear_all_occlusions(n_clicks):
+    if n_clicks:
+        sim.clear_all_occlusions()
+        # Also reset the checkboxes
+        return "Clear All Occlusions"
+    return "Clear All Occlusions"
+
+@app.callback(
+    [Output('lidar-sector-checklist', 'value', allow_duplicate=True),
+     Output('lidar-sector-checklist-2', 'value', allow_duplicate=True)],
+    [Input('clear-all-occlusions-btn', 'n_clicks')],
+    prevent_initial_call=True
+)
+def reset_checkboxes_on_clear_all(n_clicks):
+    if n_clicks:
+        return [], []
+    return [], []
 
 # Initialize MQTT client
 def initialize_client():
